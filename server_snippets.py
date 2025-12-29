@@ -1,8 +1,9 @@
-import os, json, hashlib, random, shutil, subprocess
+import os, json, hashlib, random, shutil, subprocess, threading, time
 
 # ---------------- CONFIG ----------------
 CERT_DIR = "./cert"
 KEY_REPO = "https://github.com/Idonot-Grief/httpc-keys.git"
+SYNC_INTERVAL = 3 * 3600  # 3 hours in seconds
 
 os.makedirs(CERT_DIR, exist_ok=True)
 
@@ -25,14 +26,27 @@ def sync_keys_server():
 
     # Remove deleted keys
     for f in local - remote:
-        try: os.remove(os.path.join(CERT_DIR, f))
-        except: pass
+        try:
+            os.remove(os.path.join(CERT_DIR, f))
+        except:
+            pass
 
     # Copy new/updated keys
     for f in remote:
         shutil.copyfile(os.path.join(tmp, f), os.path.join(CERT_DIR, f))
 
     shutil.rmtree(tmp, ignore_errors=True)
+
+def periodic_sync():
+    while True:
+        try:
+            sync_keys_server()
+        except Exception as e:
+            print("Error syncing keys:", e)
+        time.sleep(SYNC_INTERVAL)
+
+# Start the periodic sync in a background thread
+threading.Thread(target=periodic_sync, daemon=True).start()
 
 # ---------------- CRYPTO ----------------
 def stream(seed):
@@ -76,3 +90,7 @@ def http_response(code, body=b"", mime="text/plain"):
         f"Content-Length: {len(body)}\r\n"
         f"Content-Type: {mime}\r\n\r\n"
     ).encode() + body
+
+# ---------------- INITIAL SYNC ----------------
+# Run once at startup
+sync_keys_server()
