@@ -1,6 +1,5 @@
 import os, json, hashlib, shutil, subprocess, socket
 
-# ---------------- CONFIG ----------------
 KEY_DIR = "./keys"
 KEY_REPO = "https://github.com/Idonot-Grief/httpc-keys.git"
 
@@ -10,7 +9,6 @@ HTTP_PORT = 80
 
 os.makedirs(KEY_DIR, exist_ok=True)
 
-# ---------------- STATE ----------------
 TEMP_KEY = None
 USES = 0
 MAX_USES = 5
@@ -20,14 +18,20 @@ PUB_SEED = None
 def sync_keys():
     tmp = KEY_DIR + "_tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-    subprocess.run(["git", "clone", "--depth", "1", KEY_REPO, tmp],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    subprocess.run(
+        ["git", "clone", "--depth", "1", KEY_REPO, tmp],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
     if not os.path.exists(tmp):
         return
 
     for f in os.listdir(tmp):
         if f.endswith(".cat"):
             shutil.copyfile(os.path.join(tmp, f), os.path.join(KEY_DIR, f))
+
     shutil.rmtree(tmp, ignore_errors=True)
 
 # ---------------- CRYPTO ----------------
@@ -47,28 +51,27 @@ def ids():
     out = []
     for f in os.listdir(KEY_DIR):
         if f.endswith(".cat"):
-            with open(os.path.join(KEY_DIR, f)) as fh:
+            with open(os.path.join(KEY_DIR, f), "r", encoding="utf-8-sig") as fh:
                 out.append(json.load(fh)["id"])
     return out
 
 def seed(cid):
-    with open(os.path.join(KEY_DIR, cid + ".cat")) as fh:
+    with open(os.path.join(KEY_DIR, cid + ".cat"), "r", encoding="utf-8-sig") as fh:
         return json.load(fh)["seed"]
 
-# ---------------- FALLBACK HTTP ----------------
+# ---------------- HTTP FALLBACK ----------------
 def plain_http():
     with socket.create_connection((HOST, HTTP_PORT)) as s:
         s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
         return s.recv(65535)
 
-# ---------------- HTTPC ----------------
+# ---------------- REQUEST ----------------
 def request(payload):
     global TEMP_KEY, USES, PUB_SEED
 
     try:
         with socket.create_connection((HOST, HTTPC_PORT), timeout=1) as s:
-            hello = s.recv(1024)
-            if b"HTTPC-HELLO" not in hello:
+            if b"HTTPC-HELLO" not in s.recv(1024):
                 raise Exception
 
             s.sendall(",".join(ids()).encode() + b"\n")
@@ -81,16 +84,14 @@ def request(payload):
             PUB_SEED = seed(cid)
 
             if TEMP_KEY is None or USES >= MAX_USES:
-                enc = s.recv(4096)
-                info = json.loads(crypt(enc, PUB_SEED))
+                info = json.loads(crypt(s.recv(4096), PUB_SEED))
                 TEMP_KEY = info["temp_key"]
                 USES = 0
                 return request(payload)
 
             USES += 1
             s.sendall(crypt(crypt(payload, TEMP_KEY), PUB_SEED))
-            resp = s.recv(65535)
-            return crypt(crypt(resp, PUB_SEED), TEMP_KEY)
+            return crypt(crypt(s.recv(65535), PUB_SEED), TEMP_KEY)
 
     except:
         return plain_http()
@@ -99,5 +100,4 @@ def request(payload):
 if __name__ == "__main__":
     sync_keys()
     for i in range(10):
-        r = request(b"GET / HTTP/1.1\r\nHost:x\r\n\r\n")
-        print(r.decode(errors="ignore"))
+        print(request(b"GET / HTTP/1.1\r\nHost:x\r\n\r\n").decode(errors="ignore"))
