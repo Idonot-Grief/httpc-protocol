@@ -4,59 +4,100 @@ import os, json, hashlib, shutil, subprocess, socket
 KEY_DIR = "./keys"
 KEY_REPO = "https://github.com/Idonot-Grief/httpc-keys.git"
 
+HOST = "127.0.0.1"
+HTTPC_PORT = 228
+HTTP_PORT = 80
+
 os.makedirs(KEY_DIR, exist_ok=True)
 
+# ---------------- STATE ----------------
+TEMP_KEY = None
+USES = 0
+MAX_USES = 5
+PUB_SEED = None
+
 # ---------------- KEY SYNC ----------------
-def sync_keys_client():
+def sync_keys():
     tmp = KEY_DIR + "_tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-
-    subprocess.run(
-        ["git", "clone", "--depth", "1", KEY_REPO, tmp],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
+    subprocess.run(["git", "clone", "--depth", "1", KEY_REPO, tmp],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not os.path.exists(tmp):
         return
 
-    remote = {f for f in os.listdir(tmp) if f.endswith(".cat")}
-    local = {f for f in os.listdir(KEY_DIR) if f.endswith(".cat")}
-
-    for f in local - remote:
-        try: os.remove(os.path.join(KEY_DIR, f))
-        except: pass
-
-    for f in remote:
-        shutil.copyfile(os.path.join(tmp, f), os.path.join(KEY_DIR, f))
-
+    for f in os.listdir(tmp):
+        if f.endswith(".cat"):
+            shutil.copyfile(os.path.join(tmp, f), os.path.join(KEY_DIR, f))
     shutil.rmtree(tmp, ignore_errors=True)
 
 # ---------------- CRYPTO ----------------
-def crypt(data, seed):
-    h = hashlib.sha256(seed.encode("utf-8")).digest()
-    return bytes(b ^ h[i % len(h)] for i, b in enumerate(data))
+def stream(seed):
+    h = hashlib.sha256(seed.encode()).digest()
+    while True:
+        for b in h:
+            yield b
+        h = hashlib.sha256(h).digest()
 
-# ---------------- CERT HELPERS ----------------
-def load_ids():
-    ids = []
+def crypt(data, seed):
+    g = stream(seed)
+    return bytes(b ^ next(g) for b in data)
+
+# ---------------- CERTS ----------------
+def ids():
+    out = []
     for f in os.listdir(KEY_DIR):
         if f.endswith(".cat"):
-            with open(os.path.join(KEY_DIR, f), encoding="utf-8") as fh:
-                ids.append(json.load(fh)["id"])
-    return ids
+            with open(os.path.join(KEY_DIR, f)) as fh:
+                out.append(json.load(fh)["id"])
+    return out
 
-def load_seed(cid):
-    with open(os.path.join(KEY_DIR, cid + ".cat"), encoding="utf-8") as fh:
+def seed(cid):
+    with open(os.path.join(KEY_DIR, cid + ".cat")) as fh:
         return json.load(fh)["seed"]
 
-# ---------------- HTTPC REQUEST ----------------
-def httpc_handshake(conn):
-    """Perform HTTPC handshake. Returns seed if server selects a key, else None."""
-    conn.sendall(b"HTTPC-HELLO\n")
-    conn.sendall(",".join(load_ids()).encode() + b"\n")
-    reply = conn.recv(1024).decode(errors="ignore")
-    if "HTTPC-USE:" in reply:
-        cid = reply.split(":", 1)[1].strip()
-        return load_seed(cid)
-    return None
+# ---------------- FALLBACK HTTP ----------------
+def plain_http():
+    with socket.create_connection((HOST, HTTP_PORT)) as s:
+        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        return s.recv(65535)
+
+# ---------------- HTTPC ----------------
+def request(payload):
+    global TEMP_KEY, USES, PUB_SEED
+
+    try:
+        with socket.create_connection((HOST, HTTPC_PORT), timeout=1) as s:
+            hello = s.recv(1024)
+            if b"HTTPC-HELLO" not in hello:
+                raise Exception
+
+            s.sendall(",".join(ids()).encode() + b"\n")
+            r = s.recv(1024)
+
+            if b"HTTPC-FALLBACK" in r:
+                raise Exception
+
+            cid = r.decode().split(":")[1].strip()
+            PUB_SEED = seed(cid)
+
+            if TEMP_KEY is None or USES >= MAX_USES:
+                enc = s.recv(4096)
+                info = json.loads(crypt(enc, PUB_SEED))
+                TEMP_KEY = info["temp_key"]
+                USES = 0
+                return request(payload)
+
+            USES += 1
+            s.sendall(crypt(crypt(payload, TEMP_KEY), PUB_SEED))
+            resp = s.recv(65535)
+            return crypt(crypt(resp, PUB_SEED), TEMP_KEY)
+
+    except:
+        return plain_http()
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    sync_keys()
+    for i in range(10):
+        r = request(b"GET / HTTP/1.1\r\nHost:x\r\n\r\n")
+        print(r.decode(errors="ignore"))
