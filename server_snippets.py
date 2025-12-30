@@ -11,27 +11,25 @@ HTTP_PORT = 80
 
 os.makedirs(CERT_DIR, exist_ok=True)
 
-# ---------------- STATE ----------------
-clients = {}  # ip -> {temp_key, uses, pub_seed}
+clients = {}  # ip -> state
 
 # ---------------- KEY SYNC ----------------
 def sync_keys():
     tmp = CERT_DIR + "_tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-    subprocess.run(["git", "clone", "--depth", "1", KEY_REPO, tmp],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    subprocess.run(
+        ["git", "clone", "--depth", "1", KEY_REPO, tmp],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
     if not os.path.exists(tmp):
         return
 
-    remote = {f for f in os.listdir(tmp) if f.endswith(".cat")}
-    local = {f for f in os.listdir(CERT_DIR) if f.endswith(".cat")}
-
-    for f in local - remote:
-        try: os.remove(os.path.join(CERT_DIR, f))
-        except: pass
-
-    for f in remote:
-        shutil.copyfile(os.path.join(tmp, f), os.path.join(CERT_DIR, f))
+    for f in os.listdir(tmp):
+        if f.endswith(".cat"):
+            shutil.copyfile(os.path.join(tmp, f), os.path.join(CERT_DIR, f))
 
     shutil.rmtree(tmp, ignore_errors=True)
 
@@ -59,7 +57,8 @@ def load_certs():
     out = {}
     for f in os.listdir(CERT_DIR):
         if f.endswith(".cat"):
-            with open(os.path.join(CERT_DIR, f)) as fh:
+            path = os.path.join(CERT_DIR, f)
+            with open(path, "r", encoding="utf-8-sig") as fh:
                 j = json.load(fh)
                 out[j["id"]] = j["seed"]
     return out
@@ -72,13 +71,13 @@ def http_response(body=b"Hello (HTTP fallback)"):
         b"Content-Type: text/plain\r\n\r\n" + body
     )
 
-# ---------------- HTTPC HANDLER ----------------
+# ---------------- HTTPC ----------------
 def handle_httpc(conn, addr):
     ip = addr[0]
     certs = load_certs()
 
     conn.sendall(b"HTTPC-HELLO\n")
-    ids = conn.recv(4096).decode().strip().split(",")
+    ids = conn.recv(4096).decode(errors="ignore").strip().split(",")
 
     matches = list(set(ids) & set(certs))
     if not matches:
@@ -92,9 +91,12 @@ def handle_httpc(conn, addr):
 
     state = clients.get(ip)
     if not state or state["uses"] >= TEMP_KEY_USES:
-        temp = hashlib.sha256(f"{ip}{time.time()}{random.random()}".encode()).hexdigest()
-        clients[ip] = {"temp_key": temp, "uses": 1, "pub_seed": seed}
-        payload = json.dumps({"temp_key": temp, "uses": TEMP_KEY_USES}).encode()
+        temp = hashlib.sha256(
+            f"{ip}{time.time()}{random.random()}".encode()
+        ).hexdigest()
+
+        clients[ip] = {"temp": temp, "uses": 1, "seed": seed}
+        payload = json.dumps({"temp_key": temp}).encode()
         conn.sendall(crypt(payload, seed))
         conn.close()
         return
@@ -102,11 +104,10 @@ def handle_httpc(conn, addr):
     clients[ip]["uses"] += 1
 
     enc = conn.recv(65535)
-    data = crypt(crypt(enc, seed), clients[ip]["temp_key"])
+    data = crypt(crypt(enc, seed), clients[ip]["temp"])
 
-    body = b"Hello (HTTPC secure)"
-    resp = http_response(body)
-    out = crypt(crypt(resp, clients[ip]["temp_key"]), seed)
+    resp = http_response(b"Hello (HTTPC secure)")
+    out = crypt(crypt(resp, clients[ip]["temp"]), seed)
     conn.sendall(out)
     conn.close()
 
